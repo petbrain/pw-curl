@@ -252,7 +252,7 @@ static void init()
     PwInterfaceId_Curl = pw_register_interface("Curl", PwInterface_Curl);
 
     // create CURL request subtype
-    PwTypeId_CurlRequest = pw_subtype(
+    PwTypeId_CurlRequest = pw_struct_subtype(
         &curl_request_type, "CurlRequest",
         PwTypeId_Struct,
         CurlRequestData,

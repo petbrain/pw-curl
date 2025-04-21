@@ -177,7 +177,7 @@ int main(int argc, char* argv[])
     };
 
     // create subtype, this initializes file_request_type and returns type id
-    PwTypeId_FileRequest = pw_subtype(
+    PwTypeId_FileRequest = pw_struct_subtype(
         &file_request_type, "FileRequest",
         PwTypeId_CurlRequest,  // base type
         FileRequestData,

@@ -115,9 +115,7 @@ static PwResult parse_token(char** current_char)
     if (pw_ok(&token)) {
         size_t token_length = token_end - token_start;
         if (token_length) {
-            if (!pw_string_append_substring(&token, token_start, 0, token_length)) {
-                return PwOOM();
-            }
+            pw_expect_true( pw_string_append_substring(&token, token_start, 0, token_length) );
         }
     }
     *current_char = token_end;
@@ -164,24 +162,18 @@ static PwResult parse_quoted_string(char** current_char)
         // append what we've got and skip quote char
         qstr_length = qstr_end - qstr_start;
         if (qstr_length) {
-            if (!pw_string_append_substring(&result, qstr_start, 0, qstr_length)) {
-                return PwOOM();
-            }
+            pw_expect_true( pw_string_append_substring(&result, qstr_start, 0, qstr_length) );
         }
         qstr_end++;
         qstr_start = qstr_end;
     }
     if (*qstr_end != '"') {
         // strict parsing, ignore malformed string
-        if (!pw_string_truncate(&result, 0)) {
-            return PwOOM();
-        }
+        pw_expect_true( pw_string_truncate(&result, 0) );
     } else {
         qstr_length = qstr_end - qstr_start;
         if (qstr_length) {
-            if (!pw_string_append_substring(&result, qstr_start, 0, qstr_length)) {
-                return PwOOM();
-            }
+            pw_expect_true( pw_string_append_substring(&result, qstr_start, 0, qstr_length) );
         }
         qstr_end++;  // skip closing quote
     }
@@ -332,9 +324,7 @@ static PwResult parse_ext_value(char** current_char)
         if (c == 0) {
             break;
         }
-        if (!pw_string_append(&value, c)) {
-            return PwOOM();
-        }
+        pw_expect_true( pw_string_append(&value, c) );
     }
 
     PwValue charset = pw_create_string(charset_ptr);
@@ -598,9 +588,7 @@ PwResult curl_request_get_filename(CurlRequestData* req)
 
     PwValue filename = pw_array_item(&parts, -1);
     if (pw_strlen(&filename) == 0) {
-        if (!pw_string_append(&filename, "index.html")) {
-            return PwOOM();
-        }
+        pw_expect_true( pw_string_append(&filename, "index.html") );
     }
     return PwMap(
         PwCharPtr("filename"), pw_move(&filename),

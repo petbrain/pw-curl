@@ -68,11 +68,11 @@ void curl_update_status(PwValuePtr request);
 bool curl_perform(void* session, int* running_transfers);
 
 // utils
-PwResult urljoin_cstr(char* base_url, char* other_url);
-PwResult urljoin(PwValuePtr base_url, PwValuePtr other_url);
+[[nodiscard]] bool urljoin_cstr(char* base_url, char* other_url, PwValuePtr result);
+[[nodiscard]] bool urljoin(PwValuePtr base_url, PwValuePtr other_url, PwValuePtr result);
 
 void curl_request_parse_content_type(CurlRequestData* req);
 void curl_request_parse_content_disposition(CurlRequestData* req);
 void curl_request_parse_headers(CurlRequestData* req);
 
-PwResult curl_request_get_filename(CurlRequestData* req);
+[[nodiscard]] bool curl_request_get_filename(CurlRequestData* req, PwValuePtr result);

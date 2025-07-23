@@ -39,46 +39,39 @@ static void fini_curl_request(PwValuePtr self)
         curl_easy_cleanup(req->easy_handle);
         req->easy_handle = nullptr;
     }
-
-    // call super method
-
-    pw_ancestor_of(PwTypeId_CurlRequest)->fini(self);
 }
 
-static PwResult init_curl_request(PwValuePtr self, void* ctor_args)
+[[nodiscard]] static bool init_curl_request(PwValuePtr self, void* ctor_args)
 /*
  * Basic PW interface method
  * Initialize request structure and create CURL easy handle
  */
 {
-    // call super method
-
-    PwValue status = pw_ancestor_of(PwTypeId_CurlRequest)->init(self, ctor_args);
-    pw_return_if_error(&status);
-
-    // init request
-
     CurlRequestData* req = pw_curl_request_data_ptr(self);
 
-    req->url     = PwString();
-    req->proxy   = PwString();
-    req->media_type    = PwString();
-    req->media_subtype = PwString();
-    req->media_type_params = PwMap();
+    req->url     = PwString("");
+    req->proxy   = PwString("");
+    req->media_type    = PwString("");
+    req->media_subtype = PwString("");
+
+    if (!pw_create_map(&req->media_type_params)) {
+        return false;
+    }
     //req->content_encoding_is_utf8 = false;
     req->status  = 0;
-    req->real_url = pw_clone(&req->url);
+    pw_clone2(&req->url, &req->real_url);
 
     req->easy_handle = curl_easy_init();
     if (!req->easy_handle) {
-        fprintf(stderr, "Cannot make CURL handle\n");
+        pw_set_status(PwStatus(PW_ERROR), "CURL error");
         fini_curl_request(self);
-        return PwOOM();  // XXX use Curl error
+        return false;
     }
 
     if (!curl_request_set_headers(self, default_http_headers, PW_LENGTH(default_http_headers))) {
+        pw_set_status(PwStatus(PW_ERROR), "CURL error");
         fini_curl_request(self);
-        return PwOOM();
+        return false;
     }
 
     // other essentials
@@ -114,7 +107,7 @@ static PwResult init_curl_request(PwValuePtr self, void* ctor_args)
     //         post_data = urlencode(form_data)
     //     c.setopt(c.POSTFIELDS, post_data)
 
-    return PwOK();
+    return true;
 }
 
 static size_t request_write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
@@ -129,8 +122,7 @@ static size_t request_write_data(void* data, size_t always_1, size_t size, PwVal
         if (res != CURLE_OK || content_length < 0) {
             content_length = 0;
         }
-        req->content = pw_create_empty_string(content_length, 1);
-        if (pw_error(&req->content)) {
+        if (!pw_create_empty_string(content_length, 1, &req->content)) {
             return 0;
         }
     }
@@ -332,7 +324,10 @@ static void check_transfers(CURLM* multi_handle)
             curl_easy_getinfo(req->easy_handle, CURLINFO_EFFECTIVE_URL, &url);
             if (url) {
                 pw_destroy(&req->real_url);
-                req->real_url = pw_create_string(url);
+                if (!pw_create_string(url, &req->real_url)) {
+                    // XXX
+                    pw_panic("OOM\n");
+                }
             }
             // get response status
             curl_update_status(request);

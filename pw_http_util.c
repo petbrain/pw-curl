@@ -96,13 +96,13 @@ static inline void skip_lwsp(char** current_char)
     *current_char = ptr;
 }
 
-static PwResult parse_token(char** current_char)
+[[nodiscard]] static bool parse_token(char** current_char, PwValuePtr result)
 /*
  * https://datatracker.ietf.org/doc/html/rfc2616#section-2.2
  *
  * token = 1*<any CHAR except CTLs or separators>
  *
- * Return token as string or error.
+ * Return token.
  */
 {
     char* token_start = *current_char;
@@ -111,18 +111,19 @@ static PwResult parse_token(char** current_char)
     while (!(is_separator(*token_end) || is_ctl(*token_end))) {
         token_end++;
     }
-    PwValue token = PwString();
-    if (pw_ok(&token)) {
-        size_t token_length = token_end - token_start;
-        if (token_length) {
-            pw_expect_true( pw_string_append_substring(&token, token_start, 0, token_length) );
+    PwValue token = PW_STRING("");
+    size_t token_length = token_end - token_start;
+    if (token_length) {
+        if (!pw_string_append_substring(&token, token_start, 0, token_length)) {
+            return false;
         }
     }
     *current_char = token_end;
-    return pw_move(&token);
+    pw_move(&token, result);
+    return true;
 }
 
-static PwResult parse_quoted_string(char** current_char)
+[[nodiscard]] static bool parse_quoted_string(char** current_char, PwValuePtr result)
 /*
  * https://datatracker.ietf.org/doc/html/rfc7230#section-3.2.6
  *
@@ -131,17 +132,19 @@ static PwResult parse_quoted_string(char** current_char)
  * obs-text      = %x80-FF
  * quoted-pair   = "\" ( HTAB / SP / VCHAR / obs-text )
  *
- * Return string, null value if not a quoted string, or OOM error.
+ * Return string or null value if not a quoted string.
  */
 {
     char* qstr_start = *current_char;
 
-    PWDECL_String(result);
+    pw_destroy(result);  // this makes result Null
 
     if (*qstr_start != '"') {
-        return PwNull();
+        return true;
     }
     qstr_start++;
+
+    *result = PwString("");
 
     char* qstr_end = qstr_start;
     size_t qstr_length = 0;
@@ -162,23 +165,29 @@ static PwResult parse_quoted_string(char** current_char)
         // append what we've got and skip quote char
         qstr_length = qstr_end - qstr_start;
         if (qstr_length) {
-            pw_expect_true( pw_string_append_substring(&result, qstr_start, 0, qstr_length) );
+            if (!pw_string_append_substring(result, qstr_start, 0, qstr_length)) {
+                return false;
+            }
         }
         qstr_end++;
         qstr_start = qstr_end;
     }
     if (*qstr_end != '"') {
         // strict parsing, ignore malformed string
-        pw_expect_true( pw_string_truncate(&result, 0) );
+        if (!pw_string_truncate(result, 0)) {
+            return false;
+        }
     } else {
         qstr_length = qstr_end - qstr_start;
         if (qstr_length) {
-            pw_expect_true( pw_string_append_substring(&result, qstr_start, 0, qstr_length) );
+            if (!pw_string_append_substring(result, qstr_start, 0, qstr_length)) {
+                return false;
+            }
         }
         qstr_end++;  // skip closing quote
     }
     *current_char = qstr_end;
-    return pw_move(&result);
+    return true;
 }
 
 static inline bool is_mime_charsetc(char c)
@@ -264,7 +273,7 @@ static inline char32_t parse_value_char(char** current_char)
     return (((char32_t) high_nibble) << 4) | c;
 }
 
-static PwResult parse_ext_value(char** current_char)
+[[nodiscard]] static bool parse_ext_value(char** current_char, PwValuePtr result)
 /*
  * current_char must point to the first non-space character
  *
@@ -276,7 +285,7 @@ static PwResult parse_ext_value(char** current_char)
  *
  * language            = <Language-Tag, defined in [RFC5646], Section 2.1>
  *
- * Return string, null value if not a quoted string, or OOM error.
+ * Return string or null value if not a quoted string.
  */
 {
     char* charset_ptr = *current_char;
@@ -289,10 +298,12 @@ static PwResult parse_ext_value(char** current_char)
         charset_ptr++;
     }
 
+    pw_destroy(result);  // this makes result Null
+
     *current_char = language_ptr;
     if (*language_ptr != '\'') {
         // malformed ext-value
-        return PwNull();
+        return true;
     };
 
     *language_ptr++ = 0;  // terminate charset part
@@ -311,36 +322,41 @@ static PwResult parse_ext_value(char** current_char)
 
     if (*value_ptr != '\'') {
         // malformed ext-value
-        return PwNull();
+        return true;
     }
     *value_ptr++ = 0;  // terminate language part
     *current_char = value_ptr;
 
-    PwValue value = pw_create_empty_string(strlen(value_ptr) + 1, 1);
-    pw_return_if_error(&value);
-
+    PwValue value = PW_NULL;
+    if (!pw_create_empty_string(strlen(value_ptr) + 1, 1, &value)) {
+        return false;
+    }
     for (;;) {
         char32_t c = parse_value_char(current_char);
         if (c == 0) {
             break;
         }
-        pw_expect_true( pw_string_append(&value, c) );
+        if (!pw_string_append(&value, c)) {
+            return false;
+        }
     }
-
-    PwValue charset = pw_create_string(charset_ptr);
-    pw_return_if_error(&charset);
-
-    PwValue language = pw_create_string(language_ptr);
-    pw_return_if_error(&language);
-
-    return PwMap(
-        PwCharPtr("charset"),  pw_move(&charset),
-        PwCharPtr("language"), pw_move(&language),
-        PwCharPtr("value"),    pw_move(&value)
+    PwValue charset = PW_NULL;
+    if (!pw_create_string(charset_ptr, &charset)) {
+        return false;
+    }
+    PwValue language = PW_NULL;
+    if (!pw_create_string(language_ptr, &language)) {
+        return false;
+    }
+    return pw_map_va(
+        result,
+        PwString("charset"),  pw_clone(&charset),
+        PwString("language"), pw_clone(&language),
+        PwString("value"),    pw_clone(&value)
     );
 }
 
-static PwResult parse_media_type(char** current_char, CurlRequestData* req)
+[[nodiscard]] static bool parse_media_type(char** current_char, CurlRequestData* req)
 /*
  * https://datatracker.ietf.org/doc/html/rfc7231#section-3.1.1.1
  *
@@ -353,21 +369,29 @@ static PwResult parse_media_type(char** current_char, CurlRequestData* req)
  * XXX: replaced OWS with LWSP
  */
 {
-    PwValue media_type = parse_token(current_char);
-    pw_return_if_error(&media_type);
-
+    PwValue media_type = PW_NULL;
+    if (!parse_token(current_char, &media_type)) {
+        return false;
+    }
     if (**current_char == 0) {
-        return PwError(PW_ERROR_EOF); // XXX no suitable error code
+        pw_set_status(PwStatus(PW_ERROR));
+        return false;
     }
     if (**current_char != '/') {
-        return PwError(PW_ERROR_EOF); // XXX no suitable error code
+        pw_set_status(PwStatus(PW_ERROR_EOF));
+        return false;
     }
     (*current_char)++;
 
-    PwValue media_subtype = parse_token(current_char);
-    pw_return_if_error(&media_subtype);
+    PwValue media_subtype = PW_NULL;
+    if (!parse_token(current_char, &media_subtype)) {
+        return false;
+    }
 
-    PwValue params = PwMap();
+    PwValue params = PW_NULL;
+    if (!pw_create_map(&params)) {
+        return false;
+    }
     for (;;) {
         skip_lwsp(current_char);
         if (**current_char == 0) {
@@ -380,7 +404,10 @@ static PwResult parse_media_type(char** current_char, CurlRequestData* req)
         (*current_char)++;
         skip_lwsp(current_char);
         {
-            PwValue param_name = parse_token(current_char);
+            PwValue param_name = PW_NULL;
+            if (!parse_token(current_char, &param_name)) {
+                return false;
+            }
             skip_lwsp(current_char);
             if (**current_char != '=') {
                 break;
@@ -392,30 +419,35 @@ static PwResult parse_media_type(char** current_char, CurlRequestData* req)
                 break;
             }
 
-            PwValue param_value = PwNull();
+            PwValue param_value = PW_NULL;
             if (**current_char == '"') {
-                param_value = parse_quoted_string(current_char);
+                if (!parse_quoted_string(current_char, &param_value)) {
+                    return false;
+                }
             } else {
-                param_value = parse_token(current_char);
+                if (!parse_token(current_char, &param_value)) {
+                    return false;
+                }
             }
             if (!pw_is_string(&param_value)) {
                 break;
             }
 
-            pw_string_lower(&param_name);
-            pw_expect_ok( pw_map_update(&params, &param_name, &param_value) );
+            if (!pw_string_lower(&param_name)) {
+                return false;
+            }
+            if (!pw_map_update(&params, &param_name, &param_value)) {
+                return false;
+            }
         }
     }
-    pw_destroy(&req->media_type);
-    pw_destroy(&req->media_subtype);
-    pw_destroy(&req->media_type_params);
-    req->media_type        = pw_move(&media_type);
-    req->media_subtype     = pw_move(&media_subtype);
-    req->media_type_params = pw_move(&params);
-    return PwOK();
+    pw_move(&media_type,    &req->media_type);
+    pw_move(&media_subtype, &req->media_subtype);
+    pw_move(&params,        &req->media_type_params);
+    return true;
 }
 
-static PwResult parse_content_disposition(char** current_char, CurlRequestData* req)
+[[nodiscard]] static bool parse_content_disposition(char** current_char, CurlRequestData* req)
 /*
  * content-disposition = "Content-Disposition" ":"
  *                             disposition-type *( ";" disposition-parm )
@@ -436,12 +468,17 @@ static PwResult parse_content_disposition(char** current_char, CurlRequestData* 
  * ext-token           = <the characters in token, followed by "*">
  */
 {
-    PwValue disposition_type = parse_token(current_char);
-    pw_return_if_error(&disposition_type);
-
-    pw_string_lower(&disposition_type);
-
-    PwValue params = PwMap();
+    PwValue disposition_type = PW_NULL;
+    if (!parse_token(current_char, &disposition_type)) {
+        return false;
+    }
+    if (!pw_string_lower(&disposition_type)) {
+        return false;
+    }
+    PwValue params = PW_NULL;
+    if (!pw_create_map(&params)) {
+        return false;
+    }
     for (;;) {
         skip_lwsp(current_char);
         if (**current_char == 0) {
@@ -456,7 +493,10 @@ static PwResult parse_content_disposition(char** current_char, CurlRequestData* 
         {
             bool is_ext_value = false;
 
-            PwValue param_name = parse_token(current_char);
+            PwValue param_name = PW_NULL;
+            if (!parse_token(current_char, &param_name)) {
+                return false;
+            }
             if (**current_char == '*') {
                 is_ext_value = true;
                 (*current_char)++;
@@ -472,27 +512,34 @@ static PwResult parse_content_disposition(char** current_char, CurlRequestData* 
                 break;
             }
 
-            PwValue param_value = PwNull();
+            PwValue param_value = PW_NULL;
             if (is_ext_value) {
-                param_value = parse_ext_value(current_char);
+                if (!parse_ext_value(current_char, &param_value)) {
+                    return false;
+                }
             } else if (**current_char == '"') {
-                param_value = parse_quoted_string(current_char);
+                if (!parse_quoted_string(current_char, &param_value)) {
+                    return false;
+                }
             } else {
-                param_value = parse_token(current_char);
+                if (!parse_token(current_char, &param_value)) {
+                    return false;
+                }
             }
             if (!pw_is_string(&param_value)) {
                 break;
             }
-
-            pw_string_lower(&param_name);
-            pw_expect_ok( pw_map_update(&params, &param_name, &param_value) );
+            if (!pw_string_lower(&param_name)) {
+                return false;
+            }
+            if (!pw_map_update(&params, &param_name, &param_value)) {
+                return false;
+            }
         }
     }
-    pw_destroy(&req->disposition_type);
-    pw_destroy(&req->disposition_params);
-    req->disposition_type   = pw_move(&disposition_type);
-    req->disposition_params = pw_move(&params);
-    return PwOK();
+    pw_move(&disposition_type, &req->disposition_type);
+    pw_move(&params,           &req->disposition_params);
+    return true;
 }
 
 void curl_request_parse_content_type(CurlRequestData* req)
@@ -510,8 +557,7 @@ void curl_request_parse_content_type(CurlRequestData* req)
         return;
     }
     char* ct = content_type;
-    PwValue status = parse_media_type(&ct, req);
-    if (pw_error(&status)) {
+    if (!parse_media_type(&ct, req)) {
         fprintf(stderr, "WARNING: failed to parse content type %s\n", content_type);
     }
 }
@@ -526,10 +572,8 @@ void curl_request_parse_content_disposition(CurlRequestData* req)
         return;
     }
 
-    puts(content_disposition);
     char* p = content_disposition;
-    PwValue status = parse_content_disposition(&p, req);
-    if (pw_error(&status)) {
+    if (!parse_content_disposition(&p, req)) {
         fprintf(stderr, "WARNING: failed to parse content dispostion %s\n", content_disposition);
     }
 }
@@ -540,7 +584,7 @@ void curl_request_parse_headers(CurlRequestData* req)
     curl_request_parse_content_disposition(req);
 }
 
-PwResult curl_request_get_filename(CurlRequestData* req)
+[[nodiscard]] bool curl_request_get_filename(CurlRequestData* req, PwValuePtr result)
 /*
  * Get file name from the following sources:
  *   - Content-Disposition
@@ -554,84 +598,107 @@ PwResult curl_request_get_filename(CurlRequestData* req)
 {
     if (pw_is_map(&req->disposition_params)) {
         if (pw_is_string(&req->disposition_type) && pw_equal(&req->disposition_type, "attachment")) {
-            PwValue filename = pw_map_get(&req->disposition_params, "filename");
-            if (pw_ok(&filename)) {
+            PwValue filename = PW_NULL;
+            if (pw_map_get(&req->disposition_params, "filename", &filename)) {
                 if (pw_is_map(&filename)) {
-                    PwValue fname = pw_map_get(&filename, "value");
-                    PwValue charset = pw_map_get(&filename, "charset");
-                    return PwMap(
-                        PwCharPtr("filename"), pw_move(&fname),
-                        PwCharPtr("charset"),  pw_move(&charset)
+                    PwValue fname = PW_NULL;
+                    if (!pw_map_get(&filename, "value", &fname)) {
+                        return false;
+                    }
+                    PwValue charset = PW_NULL;
+                    if (!pw_map_get(&filename, "charset", &charset)) {
+                        return false;
+                    }
+                    return pw_map_va(
+                        result,
+                        PwString("filename"), pw_clone(&fname),
+                        PwString("charset"),  pw_clone(&charset)
                     );
                 } else {
-                    return PwMap(
-                        PwCharPtr("filename"), pw_move(&filename),
-                        PwCharPtr("charset"),  PwString()
+                    return pw_map_va(
+                        result,
+                        PwString("filename"), pw_clone(&filename),
+                        PwString("charset"),  PwString("")
                     );
                 }
             }
         }
     }
 
-    PwValue parts = PwNull();
+    PwValue parts = PW_NULL;
 
     char* last_location = get_response_header(req->easy_handle, "Location");
     if (last_location) {
-        PwValue location = pw_create_string(last_location);
-        pw_return_if_error(&location);
-
-        parts = pw_string_split_chr(&location, '/', 0);
+        PwValue location = PW_NULL;
+        if (!pw_create_string(last_location, &location)) {
+            return false;
+        }
+        if (!pw_string_split_chr(&location, '/', 0, &parts)) {
+            return false;
+        }
     } else {
-        parts = pw_string_split_chr(&req->url, '/', 0);
+        if (!pw_string_split_chr(&req->url, '/', 0, &parts)) {
+            return false;
+        }
     }
-    pw_return_if_error(&parts);
 
-    PwValue filename = pw_array_item(&parts, -1);
-    if (pw_strlen(&filename) == 0) {
-        pw_expect_true( pw_string_append(&filename, "index.html") );
+    PwValue filename = PW_NULL;
+    if (!pw_array_item(&parts, -1, &filename)) {
+        return false;
     }
-    return PwMap(
-        PwCharPtr("filename"), pw_move(&filename),
-        PwCharPtr("charset"),  PwString()
+    if (pw_strlen(&filename) == 0) {
+        if (!pw_string_append(&filename, "index.html")) {
+            return false;
+        }
+    }
+    return pw_map_va(
+        result,
+        PwString("filename"), pw_clone(&filename),
+        PwString("charset"),  PwString("")
     );
 }
 
-PwResult urljoin_cstr(char* base_url, char* other_url)
+[[nodiscard]] bool urljoin_cstr(char* base_url, char* other_url, PwValuePtr result)
 {
     CURLU* handle = curl_url();
     if (!handle) {
-        return PwOOM();
+        pw_set_status(PwStatus(PW_ERROR_OOM));
+        return false;
     }
 
     CURLUcode rc;
 
     rc = curl_url_set(handle, CURLUPART_URL, base_url, 0);
     if(rc) {
-        fprintf(stderr, "%s URL error: %s\n", __func__, curl_url_strerror(rc));
+        pw_set_status(PwStatus(PW_ERROR), "URL error: %s", curl_url_strerror(rc));
+
         curl_url_cleanup(handle);
-        return PwOOM();  // really?
+        return false;
     }
     rc = curl_url_set(handle, CURLUPART_URL, other_url, 0);
     if(rc) {
-        fprintf(stderr, "%s URL error: %s\n", __func__, curl_url_strerror(rc));
+        pw_set_status(PwStatus(PW_ERROR), "URL error: %s", curl_url_strerror(rc));
+
         curl_url_cleanup(handle);
-        return PwOOM();  // really?
+        return false;
     }
     char* url;
     rc = curl_url_get(handle, CURLUPART_URL, &url, 0);
     if(rc) {
-        fprintf(stderr, "FATAL: %s URL error: %s\n", __func__, curl_url_strerror(rc));
-        exit(1);
+        pw_set_status(PwStatus(PW_ERROR), "URL error: %s", curl_url_strerror(rc));
+
+        curl_url_cleanup(handle);
+        return false;
     }
-    PwValue result = pw_create_string(url);
+    bool ret = pw_create_string(url, result);
     curl_free(url);
     curl_url_cleanup(handle);
-    return pw_move(&result);
+    return ret;
 }
 
-PwResult urljoin(PwValuePtr base_url, PwValuePtr other_url)
+[[nodiscard]] bool urljoin(PwValuePtr base_url, PwValuePtr other_url, PwValuePtr result)
 {
     PW_CSTRING_LOCAL(cstr_base_url, base_url);
     PW_CSTRING_LOCAL(cstr_other_url, other_url);
-    return urljoin_cstr(cstr_base_url, cstr_other_url);
+    return urljoin_cstr(cstr_base_url, cstr_other_url, result);
 }

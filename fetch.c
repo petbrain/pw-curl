@@ -18,8 +18,12 @@ typedef struct {
 
 
 // global parameters from argv
-__PWDECL_Null( proxy );
-__PWDECL_Bool( verbose, false );
+_PwValue proxy   = PW_NULL;
+_PwValue verbose = PW_BOOL(false);
+
+
+// CURL session
+void* curl_session = nullptr;
 
 
 // signal handling
@@ -32,15 +36,15 @@ void sigint_handler(int sig)
     pending_sigint = 1;
 }
 
-void create_request(void* session, PwValuePtr url)
+[[nodiscard]] bool create_request(PwValuePtr url)
 /*
  * Helper function to create Curl request of our custom FileRequest type
  */
 {
-    PwValue request = pw_create(PwTypeId_FileRequest);
-    if (pw_error(&request)) {
-        pw_print_status(stdout, &request);
-        return;
+    PwValue request = PW_NULL;
+    if (!pw_create(PwTypeId_FileRequest, &request)) {
+        pw_print_status(stdout, &current_task->status);
+        return false;
     }
 
     PW_CSTRING_LOCAL(url_cstr, url);
@@ -51,10 +55,12 @@ void create_request(void* session, PwValuePtr url)
     if (verbose.bool_value) {
         curl_request_verbose(&request, true);
     }
-    add_curl_request(session, &request);
+    add_curl_request(curl_session, &request);
 
     // request is now held by Curl handle
     // and will be destroyed in curl_perform
+
+    return true;
 }
 
 size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
@@ -84,27 +90,38 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
 
         // get file name from response headers
         curl_request_parse_headers(curl_req);
-        PwValue filename_info = curl_request_get_filename(curl_req);
-        PwValue full_name = pw_map_get(&filename_info, "filename");
-        PwValue filename = pw_basename(&full_name);
-        if (pw_error(&filename) || pw_strlen(&filename) == 0) {
+        PwValue filename_info = PW_NULL;
+        if (!curl_request_get_filename(curl_req, &filename_info)) {
+            return 0;
+        }
+        PwValue full_name = PW_NULL;
+        if (!pw_map_get(&filename_info, "filename", &full_name)) {
+            pw_destroy(&full_name);
+            full_name = PwString("");
+        }
+        PwValue filename = PW_NULL;
+        if (!pw_basename(&full_name, &filename) || pw_strlen(&filename) == 0) {
             // get file name from URL
-            PwValue parts = pw_string_split_chr(&curl_req->url, '?', 1);
-            PwValue url = pw_array_item(&parts, 0);
-            pw_destroy(&filename);
-            filename = pw_basename(&url);
-            if (pw_error(&filename)) {
-                pw_print_status(stdout, &filename);
+            PwValue parts = PW_NULL;
+            if (!pw_string_split_chr(&curl_req->url, '?', 1, &parts)) {
+                return 0;
+            }
+            PwValue url = PW_NULL;
+            if (!pw_array_item(&parts, 0, &url)) {
+                return 0;
+            }
+            if (!pw_basename(&url, &filename)) {
                 return 0;
             }
             if (pw_strlen(&filename) == 0) {
-                pw_string_append(&filename, "index.html");
+                if (!pw_string_append(&filename, "index.html")) {
+                    return 0;
+                }
             }
         }
 
-        file_req->file = pw_file_open(&filename, O_CREAT | O_RDWR | O_TRUNC, 0644);
-        if (pw_error(&file_req->file)) {
-            pw_print_status(stdout, &file_req->file);
+        if (!pw_file_open(&filename, O_CREAT | O_RDWR | O_TRUNC, 0644, &file_req->file)) {
+            pw_print_status(stdout, &current_task->status);
             return 0;
         }
         PW_CSTRING_LOCAL(url_cstr, &curl_req->url);
@@ -115,9 +132,8 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
     // write data to file
 
     unsigned bytes_written;
-    PwValue status = pw_write(&file_req->file, data, size, &bytes_written);
-    if (pw_error(&status)) {
-        pw_print_status(stdout, &status);
+    if (!pw_write(&file_req->file, data, size, &bytes_written)) {
+        pw_print_status(stdout, &current_task->status);
         return 0;
     }
     return bytes_written;
@@ -142,7 +158,9 @@ void request_complete(PwValuePtr self)
         return;
     }
 
-    pw_file_close(&file_req->file);
+    if (!pw_file_close(&file_req->file)) {
+        // ignore error
+    }
 }
 
 void fini_file_request(PwValuePtr self)
@@ -153,9 +171,95 @@ void fini_file_request(PwValuePtr self)
     FileRequestData* req = file_request_data_ptr(self);
 
     pw_destroy(&req->file);
+}
 
-    // call super method
-    pw_ancestor_of(PwTypeId_FileRequest)->fini(self);
+static bool pw_main(int argc, char* argv[])
+{
+    // parse command line arguments
+    PwValue urls = PW_NULL;
+    if (!pw_create_array(&urls)) {
+        return false;
+    }
+    PwValue parallel = PW_UNSIGNED(1);
+    for (int i = 1; i < argc; i++) {{  // mind double curly brackets for nested scope
+        // nested scope makes autocleaning working after each iteration
+
+        PwValue arg = PW_NULL;
+        if (!pw_create_string(argv[i], &arg)) {
+            return false;
+        }
+        if (pw_startswith(&arg, "http://") || pw_startswith(&arg, "https://")) {
+            if (!pw_array_append(&urls, &arg)) {
+                return false;
+            }
+        } else if (pw_startswith(&arg, "verbose=")) {
+            PwValue v = PW_NULL;
+            if (!pw_substr(&arg, strlen("verbose="), pw_strlen(&arg), &v)) {
+                return false;
+            }
+            verbose.bool_value = pw_equal(&v, "1");
+
+        } else if (pw_startswith(&arg, "proxy=")) {
+            if (!pw_substr(&arg, strlen("proxy="), pw_strlen(&arg), &proxy)) {
+                return false;
+            }
+        } else if (pw_startswith(&arg, "parallel=")) {
+            PwValue s = PW_NULL;
+            if (!pw_substr(&arg, strlen("parallel="), pw_strlen(&arg), &s)) {
+                return false;
+            }
+            PwValue n = PW_NULL;
+            if (pw_parse_number(&s, &n)) {
+                parallel = n;
+            }
+        }
+    }}
+    if (pw_array_length(&urls) == 0) {
+        printf("Usage: fetch [verbose=1|0] [proxy=<proxy>] [parallel=<n>] url1 url2 ...\n");
+        return true;
+    }
+
+    // fetch URLs
+    // prepare first request
+    {
+        PwValue url = PW_NULL;
+        if (!pw_array_pop(&urls, &url)) {
+            return false;
+        }
+        if (!create_request(&url)) {
+            return false;
+        }
+    }
+
+    // perform fetching
+
+    while(!pending_sigint) {
+        int running_transfers;
+        if (!curl_perform(curl_session, &running_transfers)) {
+            // failure
+            // XXX set status
+            break;
+        }
+        unsigned i = running_transfers;
+        // add more requests
+        for(; i < parallel.signed_value; i++) {{
+            if (pw_array_length(&urls) == 0) {
+                break;
+            }
+            PwValue url = PW_NULL;
+            if (!pw_array_pop(&urls, &url)) {
+                return false;
+            }
+            if (!create_request(&url)) {
+                return false;
+            }
+        }}
+        if (i == 0) {
+            // no running transfers and no more URLs were added
+            break;
+        }
+    }
+    return true;
 }
 
 int main(int argc, char* argv[])
@@ -193,82 +297,15 @@ int main(int argc, char* argv[])
 
     signal(SIGINT, sigint_handler);
 
-    // create session
+    // main routine
 
-    void* session = create_curl_session();
+    curl_session = create_curl_session();
 
-    // parse command line arguments
-    PwValue urls = PwArray();
-    PwValue parallel = PwUnsigned(1);
-    for (int i = 1; i < argc; i++) {{  // mind double curly brackets for nested scope
-        // nested scope makes autocleaning working after each iteration
-
-        PwValue arg = pw_create_string(argv[i]);
-
-        if (pw_startswith(&arg, "http://") || pw_startswith(&arg, "https://")) {
-            pw_array_append(&urls, &arg);
-
-        } else if (pw_startswith(&arg, "verbose=")) {
-            PwValue v = pw_substr(&arg, strlen("verbose="), pw_strlen(&arg));
-            verbose.bool_value = pw_equal(&v, "1");
-
-        } else if (pw_startswith(&arg, "proxy=")) {
-            proxy = pw_substr(&arg, strlen("proxy="), pw_strlen(&arg));
-
-        } else if (pw_startswith(&arg, "parallel=")) {
-            PwValue s = pw_substr(&arg, strlen("parallel="), pw_strlen(&arg));
-            PwValue n = pw_parse_number(&s);
-            if (pw_is_int(&n)) {
-                parallel = n;
-            }
-        }
-    }}
-    if (pw_array_length(&urls) == 0) {
-        printf("Usage: fetch [verbose=1|0] [proxy=<proxy>] [parallel=<n>] url1 url2 ...\n");
-        goto out;
+    if (!pw_main(argc, argv)) {
+        pw_print_status(stdout, &current_task->status);
     }
 
-    // fetch URLs
-    // prepare first request
-    {
-        PwValue url = pw_array_pop(&urls);
-        if (pw_error(&url)) {
-            pw_print_status(stdout, &url);
-            goto out;
-        }
-        create_request(session, &url);
-    }
-
-    // perform fetching
-
-    while(!pending_sigint) {
-        int running_transfers;
-        if (!curl_perform(session, &running_transfers)) {
-            // failure
-            break;
-        }
-        unsigned i = running_transfers;
-        // add more requests
-        for(; i < parallel.signed_value; i++) {{
-            if (pw_array_length(&urls) == 0) {
-                break;
-            }
-            PwValue url = pw_array_pop(&urls);
-            if (pw_error(&url)) {
-                pw_print_status(stdout, &url);
-                break;
-            }
-            create_request(session, &url);
-        }}
-        if (i == 0) {
-            // no running transfers and no more URLs were added
-            break;
-        }
-    }
-
-out:
-
-    delete_curl_session(session);
+    delete_curl_session(curl_session);
 
     // global finalization
 

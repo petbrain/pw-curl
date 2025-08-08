@@ -129,7 +129,7 @@ static size_t request_write_data(void* data, size_t always_1, size_t size, PwVal
     if (!size) {
         return 0;
     }
-    if (!pw_string_append_buffer(&req->content, (uint8_t*) data, size)) {
+    if (!pw_string_append(&req->content, (char*) data, ((char*) data) + size)) {
         return 0;
     }
     return size;

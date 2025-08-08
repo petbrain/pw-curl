@@ -23,6 +23,11 @@ typedef struct {
 
 
 typedef struct {
+    /*
+     * This structure extends _PwStructData.
+     */
+    _PwStructData struct_data;
+
     CURL* easy_handle;
 
     _PwValue url;
@@ -47,7 +52,7 @@ typedef struct {
 
 } CurlRequestData;
 
-#define pw_curl_request_data_ptr(value)  ((CurlRequestData*) _pw_get_data_ptr((value), PwTypeId_CurlRequest))
+#define pw_curl_request_data_ptr(value)  ((CurlRequestData*) ((value)->struct_data))
 
 // sessions
 void* create_curl_session();

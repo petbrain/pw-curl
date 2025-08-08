@@ -112,11 +112,8 @@ static inline void skip_lwsp(char** current_char)
         token_end++;
     }
     PwValue token = PW_STRING("");
-    size_t token_length = token_end - token_start;
-    if (token_length) {
-        if (!pw_string_append_substring(&token, token_start, 0, token_length)) {
-            return false;
-        }
+    if (!pw_string_append(&token, token_start, token_end)) {
+        return false;
     }
     *current_char = token_end;
     pw_move(&token, result);
@@ -147,7 +144,6 @@ static inline void skip_lwsp(char** current_char)
     *result = PwString("");
 
     char* qstr_end = qstr_start;
-    size_t qstr_length = 0;
     for (;;) {
         unsigned char c = *qstr_end;
         if (is_ctl(c)) {
@@ -163,11 +159,8 @@ static inline void skip_lwsp(char** current_char)
             continue;
         }
         // append what we've got and skip quote char
-        qstr_length = qstr_end - qstr_start;
-        if (qstr_length) {
-            if (!pw_string_append_substring(result, qstr_start, 0, qstr_length)) {
-                return false;
-            }
+        if (!pw_string_append(result, qstr_start, qstr_end)) {
+            return false;
         }
         qstr_end++;
         qstr_start = qstr_end;
@@ -178,11 +171,8 @@ static inline void skip_lwsp(char** current_char)
             return false;
         }
     } else {
-        qstr_length = qstr_end - qstr_start;
-        if (qstr_length) {
-            if (!pw_string_append_substring(result, qstr_start, 0, qstr_length)) {
-                return false;
-            }
+        if (!pw_string_append(result, qstr_start, qstr_end)) {
+            return false;
         }
         qstr_end++;  // skip closing quote
     }
@@ -647,7 +637,7 @@ void curl_request_parse_headers(CurlRequestData* req)
         return false;
     }
     if (pw_strlen(&filename) == 0) {
-        if (!pw_string_append(&filename, "index.html")) {
+        if (!pw_string_append(&filename, "index.html", nullptr)) {
             return false;
         }
     }

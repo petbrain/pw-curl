@@ -9,12 +9,17 @@
 PwTypeId PwTypeId_FileRequest = 0;
 
 typedef struct {
+    /*
+     * This structure extends CurlRequestData.
+     */
+    CurlRequestData curl_request;
+
     _PwValue file;  // autocleaned PwValue is not suitable for manually managed data,
                     // using bare structure that starts with underscore
 } FileRequestData;
 
 // this macro gets pointer to FileRequestData from PwValue
-#define file_request_data_ptr(value)  ((FileRequestData*) _pw_get_data_ptr((value), PwTypeId_FileRequest))
+#define file_request_data_ptr(value)  ((FileRequestData*) ((value)->struct_data))
 
 
 // global parameters from argv
@@ -73,15 +78,14 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
         return 0;
     }
 
-    CurlRequestData* curl_req = pw_curl_request_data_ptr(self);
     FileRequestData* file_req = file_request_data_ptr(self);
 
     // get status from curl request
     curl_update_status(self);
 
-    if(curl_req->status != 200) {
-        PW_CSTRING_LOCAL(url_cstr, &curl_req->url);
-        printf("FAILED: %u %s\n", curl_req->status, url_cstr);
+    if(file_req->curl_request.status != 200) {
+        PW_CSTRING_LOCAL(url_cstr, &file_req->curl_request.url);
+        printf("FAILED: %u %s\n", file_req->curl_request.status, url_cstr);
         return 0;
     }
     if (pw_is_null(&file_req->file)) {
@@ -89,9 +93,9 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
         // the file is not created yet, do that
 
         // get file name from response headers
-        curl_request_parse_headers(curl_req);
+        curl_request_parse_headers(&file_req->curl_request);
         PwValue filename_info = PW_NULL;
-        if (!curl_request_get_filename(curl_req, &filename_info)) {
+        if (!curl_request_get_filename(&file_req->curl_request, &filename_info)) {
             return 0;
         }
         PwValue full_name = PW_NULL;
@@ -103,7 +107,7 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
         if (!pw_basename(&full_name, &filename) || pw_strlen(&filename) == 0) {
             // get file name from URL
             PwValue parts = PW_NULL;
-            if (!pw_string_split_chr(&curl_req->url, '?', 1, &parts)) {
+            if (!pw_string_split_chr(&file_req->curl_request.url, '?', 1, &parts)) {
                 return 0;
             }
             PwValue url = PW_NULL;
@@ -114,7 +118,7 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
                 return 0;
             }
             if (pw_strlen(&filename) == 0) {
-                if (!pw_string_append(&filename, "index.html")) {
+                if (!pw_string_append(&filename, "index.html", nullptr)) {
                     return 0;
                 }
             }
@@ -124,7 +128,7 @@ size_t write_data(void* data, size_t always_1, size_t size, PwValuePtr self)
             pw_print_status(stdout, &current_task->status);
             return 0;
         }
-        PW_CSTRING_LOCAL(url_cstr, &curl_req->url);
+        PW_CSTRING_LOCAL(url_cstr, &file_req->curl_request.url);
         PW_CSTRING_LOCAL(filename_cstr, &filename);
         printf("Downloading %s -> %s\n", url_cstr, filename_cstr);
     }
@@ -144,12 +148,11 @@ void request_complete(PwValuePtr self)
  * Overloaded method of Curl interface.
  */
 {
-    CurlRequestData* curl_req = pw_curl_request_data_ptr(self);
     FileRequestData* file_req = file_request_data_ptr(self);
 
-    if(curl_req->status != 200) {
-        PW_CSTRING_LOCAL(url_cstr, &curl_req->url);
-        printf("FAILED: %u %s\n", curl_req->status, url_cstr);
+    if(file_req->curl_request.status != 200) {
+        PW_CSTRING_LOCAL(url_cstr, &file_req->curl_request.url);
+        printf("FAILED: %u %s\n", file_req->curl_request.status, url_cstr);
         return;
     }
 
